@@ -6,6 +6,24 @@ The repository creates deployment artifacts. Running the infrastructure commands
 
 For private access from your LAN, follow the [VPN gateway deployment instructions](vpngw/README.md) before provisioning the GPU VM. The optional VPN setup creates a separate VPC and workload subnet, then deploys a gateway VM using `nebius-vpngw`.
 
+## Table of contents
+
+- [What runs where](#what-runs-where)
+- [1. Environment, configuration, and setup](#1-environment-configuration-and-setup)
+- [2. Provision and inspect bootstrap](#2-provision-and-inspect-bootstrap)
+- [3. Copy deployment files and SSH into the VM](#3-copy-deployment-files-and-ssh-into-the-vm)
+- [4. Prepare the application configuration](#4-prepare-the-application-configuration)
+- [5. Deploy HTTP, then optionally add HTTPS](#5-deploy-http-then-optionally-add-https)
+  - [Choose service exposure](#choose-service-exposure)
+  - [Deploy and verify HTTP](#deploy-and-verify-http)
+  - [Optional: add cert-manager and HTTPS](#optional-add-cert-manager-and-https)
+  - [Optional: add HTTPS with your own certificate](#optional-add-https-with-your-own-certificate)
+- [6. Connect directly to vLLM](#6-connect-directly-to-vllm)
+- [7. Run AIPerf](#7-run-aiperf)
+- [8. Run OpenCode v2](#8-run-opencode-v2)
+- [9. Measure individual round trips](#9-measure-individual-round-trips)
+- [10. Validate and stop](#10-validate-and-stop)
+
 ## What runs where
 
 | Component | Location | Managed by |
