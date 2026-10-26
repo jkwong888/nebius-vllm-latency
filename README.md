@@ -1,10 +1,10 @@
 # Gemma 4 vLLM benchmarks
 
-Deploy one reasoning-enabled vLLM server in a Nebius region (`uk-south1` by default), then run AIPerf and OpenCode directly against its OpenAI-compatible API. Measure individual HTTP round trips separately using `/health`. The serving pod runs vLLM without a latency proxy or meter sidecar.
+Deploy one reasoning-enabled vLLM server in a Nebius region (`uk-south1` by default), then run AIPerf and OpenCode directly against its OpenAI-compatible API. Measure individual HTTP round trips separately using `/health`.
 
-The repository creates deployment artifacts. Running the infrastructure commands below provisions billable resources. 
+The repository creates deployment artifacts. Running the infrastructure commands below provisions billable resources.
 
-The main `infra/` Terraform deployment does not create a VPN gateway. For private access from your LAN, follow the [VPN gateway deployment instructions](vpngw/README.md) before provisioning the GPU VM. The optional VPN setup creates a separate VPC and workload subnet, then deploys a gateway VM using `nebius-vpngw`.
+For private access from your LAN, follow the [VPN gateway deployment instructions](vpngw/README.md) before provisioning the GPU VM. The optional VPN setup creates a separate VPC and workload subnet, then deploys a gateway VM using `nebius-vpngw`.
 
 ## What runs where
 
@@ -14,7 +14,7 @@ The main `infra/` Terraform deployment does not create a VPN gateway. For privat
 | Single-node k3s with embedded containerd and tunnel agent | GPU VM | Cloud-init |
 | NVIDIA device plugin | k3s | Cloud-init, using the repository manifest |
 | cert-manager, vLLM and ingress | k3s | YAML and `kubectl apply` |
-| AIPerf, OpenCode and HTTP round-trip checks | Your Mac | `uv run`, OpenCode and curl |
+| AIPerf, OpenCode and HTTP round-trip checks | Your local host | `uv run`, OpenCode and curl |
 
 We use single-node K3s and its packaged Helm controller installs charts through Kubernetes Jobs. The optional cert-manager overlay installs it via the `HelmChart` CRD. We configure the bundled Traefik chart using `HelmChartConfig` YAML.
 
@@ -31,7 +31,7 @@ Local dependencies required:
 - npm
 - rsync
 
-Run the following to prepare the uv environment and base template files. Later commands use `uv run --no-sync` with this environment, so activation is not required:
+Run the following to prepare the uv environment and base template files:
 
 ```sh
 uv venv --python 3.12
@@ -47,7 +47,15 @@ Create a tenant and project in Nebius.
 
 In `terraform.tfvars`, populate project/network/subnet IDs and your SSH public key.
 
-Set the VM platform and its resource preset in `infra/terraform.tfvars`. The defaults are:
+e.g.
+```hcl
+project_id     = "project-MY_PROJECT_ID"
+network_id     = "vpcnetwork-MY-VPC_NETWORK_ID"
+subnet_id      = "vpcsubnet-MY_VPC_SUBNET_ID"
+ssh_public_key = "<my ssh public key>"
+```
+
+Optionally, add the VM platform and its resource preset in `infra/terraform.tfvars`. The defaults are:
 
 ```hcl
 platform = "gpu-b300-sxm"
@@ -56,7 +64,7 @@ preset   = "1gpu-24vcpu-346gb"
 
 Choose a GPU platform and a preset it supports in your region. Bootstrap checks NVIDIA driver and runtime availability.
 
-The default follows market spot prices. Supply `spot_pricing_policy_id` to use an existing maximum-price policy instead. Check your available quota and available machine preset before applying:
+The default provisions a spot VM that follows market spot prices. Supply `spot_pricing_policy_id` to use an existing maximum-price policy instead. Check your available quota and available machine preset before applying:
 
 ```sh
 nebius compute platform list --parent-id YOUR_PROJECT_ID
@@ -64,10 +72,6 @@ nebius compute image list-public --region uk-south1
 ```
 
 This example uses the `ubuntu24.04-cuda13.0` image. Nebius documents driver 580.x, CUDA 13.0 and Container Toolkit in that image. The resolved image ID is a Terraform output. Set `image_id` to that ID for subsequent reproducibility. [Image documentation](https://docs.nebius.com/compute/storage/boot-disk-images)
-
-Deploy HTTP first in step 5. You can then add cert-manager and Let’s Encrypt certificates using the optional HTTPS upgrade in that step. The example uses Cloudflare DNS-01. Its hostname, DNS zone, ACME email and issuer settings live in `k8s/overlays/local-cert-manager/.env`, which is ignored by Git.
-
-Clients select a network path using `LLM_BASE_URL`, such as `http://PRIVATE_IP` for VPN access, `http://PUBLIC_IP` for public access, or the actual HTTPS tunnel URL from Nebius. HTTPS routes require a hostname covered by the certificate. With cert-manager, use `LLM_HOST`. TLS is independent of the network path.
 
 ## 2. Provision and inspect bootstrap
 
@@ -80,10 +84,11 @@ terraform -chdir=infra apply deployment.tfplan
 terraform -chdir=infra output
 ```
 
-Cloud-init performs these steps in order:
+Cloud-init runs once the VM boots up and performs these steps in order:
 
 1. Create a user `ubuntu` with your SSH key.
-2. Mount the secondary disk at `/srv/llm` using `/dev/disk/by-id/virtio-llm-data`. Disk size is configured in `boot_disk_size_gib` and `data_disk_size_gib` in `infra/terraform.tfvars`, the defaults are 100 GiB Network SSD for boot and 279 GiB (93 × 3) non-replicated Network SSD for data. We use the non replicated disk for higher IOPS and bandwidth than the standard Network SSD and store container images and model data here. The bandwidth scales with the size of the disk, you can experiment with it to improve model download and load times.
+2. Mount the secondary disk at `/srv/llm` using `/dev/disk/by-id/virtio-llm-data`. Disk size is configured in `boot_disk_size_gib` and `data_disk_size_gib` in `infra/terraform.tfvars`, the defaults are 100 GiB Network SSD for boot and 279 GiB (93 × 3) non-replicated Network SSD for data. 
+   - We use the non replicated disk for higher IOPS and bandwidth than the standard Network SSD and store container images and model data here. The bandwidth scales with the size of the disk, you can experiment with it to improve model download and load times.
    - On first boot, bootstrap creates an EXT4 filesystem on the blank data disk and records the mount in `/etc/fstab` for subsequent reboots.
 3. Run `nvidia-smi` to check GPU availability, verifies NVIDIA driver 580 or newer, and checks Container Toolkit and the NVIDIA runtime.
 4. Install basic host tools (`curl`, `ca-certificates`, `jq`, `rsync`). 
@@ -91,7 +96,7 @@ Cloud-init performs these steps in order:
 5. Install k3s with embedded containerd, private node addressing, secrets encryption, restrictive kubeconfig permissions, and data under `/srv/llm/k3s` on the data disk.
 6. Check node readiness and NVIDIA RuntimeClass registration, apply the NVIDIA device plugin manifest, and wait for its DaemonSet to finish rolling out. 
 7. Install tunnel agent v1.2.0 using the release archive and published SHA256 checksum. Create a restricted systemd service and configures VM metadata authentication. Its HTTP target is `127.0.0.1:8088`.
-8. Write status and version logs. An active agent process does not prove edge connectivity, which is checked separately before testing.
+8. Write status and version logs.
 
 You can view the bootstrap status in the log
 
@@ -108,12 +113,12 @@ nebius tunnel get --id YOUR_TUNNEL_ID
 
 ## 3. Copy deployment files and SSH into the VM
 
-From your Mac, sync only the Kubernetes deployment manifests to the VM. This includes any local overlay `.env` and Secret files under `k8s/`, so the VM can apply the configuration you prepared. The command preserves the directory layout and restricts access to the deployment directory to the SSH user. Files that exist only on the VM are retained.
+From your local host, sync only the Kubernetes deployment manifests to the VM. This includes any local overlay `.env` and Secret files under `k8s/`, so the VM can apply the configuration you prepared. The command preserves the directory layout and restricts access to the deployment directory to the SSH user. Files that exist only on the VM are retained.
 
 Rsync must be installed on both machines. Bootstrap installs it on new VMs. For an older VM without it, run `sudo apt-get update && sudo apt-get install -y rsync` in an SSH session first.
 
 ```sh
-export SSH_TARGET=ubuntu@PUBLIC_IP
+export SSH_TARGET=ubuntu@<VM_IP>
 ssh "$SSH_TARGET" 'umask 077 && mkdir -p ~/llm-latency-test && chmod 700 ~/llm-latency-test'
 rsync -av --relative \
   --exclude='.DS_Store' --exclude='._*' --exclude='__pycache__/' \
@@ -139,7 +144,7 @@ On the VM, run these commands from `~/llm-latency-test`. Preview the default ove
 kubectl kustomize k8s/overlays/local
 ```
 
-The deployment uses the published `vllm/vllm-openai:v0.32.0` image. No custom container build or image import is needed.
+The deployment uses the published `vllm/vllm-openai:v0.32.0` image.
 
 Create a namespace in Kubernetes to hold the inference server.
 
@@ -171,7 +176,7 @@ kubectl -n llm-latency delete job gpu-check
 
 ### Choose service exposure
 
-TLS is independent of the network path. Public and VPN clients can use either protocol when the corresponding route is enabled. Both routes forward to the same `gemma:8080` service, which targets vLLM directly on pod port 8000.
+By default, we will deploy the vLLM service and expose it in plaintext HTTP. Optionally, you can choose to terminate TLS connections in the included Traefik ingress controller.  Both routes forward to the same `gemma:8080` service, which targets vLLM directly on pod port 8000.
 
 | Overlay | Service routes | Certificate source |
 | --- | --- | --- |
@@ -206,7 +211,7 @@ kubectl -n llm-latency logs deployment/gemma -c vllm --tail=80
 
 The application serves HTTP on port 80. Use an `http://` client URL. HTTP sends the API key and request/response content unencrypted, so use it on a trusted network or through the VPN. Allow TCP port 80 through any firewall used for direct HTTP access. The Nebius tunnel continues to use its public HTTPS URL.
 
-You can proceed to step 6 with this deployment. To add HTTPS, continue below in the same SSH session.
+If you're okay with plaintext HTTP, you can proceed to step 6 with this deployment. To add HTTPS, continue below in the same SSH session.
 
 ### Optional: add cert-manager and HTTPS
 
@@ -223,7 +228,7 @@ for deployment in cert-manager cert-manager-webhook cert-manager-cainjector; do
 done
 ```
 
-In this example, we configure certificate issuance through Cloudflare DNS-01. Prepare a Cloudflare token scoped to Zone DNS Edit and Zone Read for the selected zone, then populate and apply its Secret:
+In this example, we configure certificate issuance through Cloudflare with DNS-01 authorization. Prepare a Cloudflare token scoped to Zone DNS Edit and Zone Read for the selected zone, then populate and apply its Secret:
 
 ```sh
 cp -n k8s/secrets/cloudflare.secret.yaml.example k8s/secrets/cloudflare.secret.yaml
@@ -259,9 +264,9 @@ kubectl apply -k "$KUSTOMIZE_OVERLAY"
 kubectl -n llm-latency wait --for=condition=Ready certificate/llm-tls --timeout=600s
 ```
 
-Wait until the replacement Certificate is Ready and the endpoint presents a trusted production certificate before testing. Never disable TLS verification. On your Mac, set `LLM_BASE_URL` to `https://` using the `LLM_HOST` hostname for direct HTTPS access. The Nebius tunnel retains its own external URL.
+Wait until the replacement Certificate is Ready and the endpoint presents a trusted production certificate before testing. On your local host, set `LLM_BASE_URL` to `https://` using the `LLM_HOST` hostname for direct HTTPS access. The Nebius tunnel retains its own external URL.
 
-Installing cert-manager alone leaves HTTP running. The HTTPS application route uses Traefik's [IngressRoute TLS configuration](https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/crd/http/ingressroute/). Applying `local-cert-manager` retains the HTTP route.
+The HTTPS application route uses Traefik's [IngressRoute TLS configuration](https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/crd/http/ingressroute/).
 
 ### Optional: add HTTPS with your own certificate
 
@@ -279,7 +284,7 @@ Allow TCP port 443 and use `https://` client URLs with a hostname covered by the
 
 ## 6. Connect directly to vLLM
 
-Leave the VM's SSH session and run the remaining commands from your local repository. The environment prepared in step 1 is selected with `uv run --no-sync`, without activation:
+Leave the VM's SSH session and run the remaining commands from your local repository:
 
 ```sh
 export LLM_BASE_URL="http://$(terraform -chdir=infra output -raw private_ip | cut -d/ -f1)"
@@ -287,7 +292,7 @@ export LLM_BASE_URL="http://$(terraform -chdir=infra output -raw private_ip | cu
 export OPENAI_BASE_URL="${LLM_BASE_URL}/v1"
 ```
 
-Terraform's address outputs include a CIDR suffix such as `/32`. The command removes it so `LLM_BASE_URL` is an origin such as `http://10.80.1.8`, with no path. The private IP requires a working VPN route. For public access, use the public IP. For HTTPS, use the certificate hostname. For tunnel access, use the actual Nebius tunnel URL. Keep `LLM_BASE_URL` free of a trailing slash and `/v1`. Reset `OPENAI_BASE_URL` after changing it.
+`LLM_BASE_URL` is an origin such as `http://10.80.1.8`, with no path. The private IP requires a working VPN route. For public access, use the public IP. For HTTPS, use the certificate hostname. For tunnel access, use the actual Nebius tunnel URL. Keep `LLM_BASE_URL` free of a trailing slash and `/v1`. Reset `OPENAI_BASE_URL` after changing it.
 
 Load `LLM_API_KEY` into your local environment securely. It must match the `api-key` in the deployed `llm-secrets` Secret. Check health, model discovery and Prometheus metrics:
 
@@ -334,7 +339,7 @@ AIPerf prints TTFT, inter-token latency and completion latency measured from the
 
 The `--network-latency-automatic` option collects TCP-handshake RTT samples during the run. AIPerf preserves raw timings and emits a network RTT summary and separate `network_adjusted_*` metrics. The adjustment subtracts the mean TCP RTT. That should give an idea of the impact of the network.
 
-Here is an example output.  You can see the avg Request Latency vs the avg Network Adjusted Request Latency gives an estimate of the impact of the network.  in this case ~110ms out of the full 20s request.
+Here is an example output.  You can see the avg Request Latency vs the avg Network Adjusted Request Latency gives an estimate of the impact of the network.  in this case ~110ms out of the full 20s request, since I ran this against a vLLM running in UK from North America.
 
 ```sh
                                                     NVIDIA AIPerf | LLM Metrics                                                     
@@ -371,7 +376,7 @@ Here is an example output.  You can see the avg Request Latency vs the avg Netwo
 
 ## 8. Run OpenCode v2
 
-Run OpenCode v2 on your local machine with the model served remotely by vLLM. The example pins `@opencode/cli` to version `2.1.4` and installs it under the ignored `.local/opencode-v2/` directory. [OpenCode v2 installation](https://opencode.ai/v2/docs/)
+Run OpenCode v2 on your local machine with the model served remotely by vLLM. The example pins `@opencode/cli` to version `2.1.4` and installs it under the `.local/opencode-v2/` directory. [OpenCode v2 installation](https://opencode.ai/v2/docs/)
 
 The maintained [OpenCode v2 configuration](config/opencode.example.json) connects directly to `${OPENAI_BASE_URL}` and reads the key from `LLM_API_KEY`. It uses v2 `providers`, `settings`, and ordered `permissions` fields. The `nebius` provider uses the built-in OpenAI-compatible package, with model limits and tool support defined explicitly. [OpenCode v2 providers](https://opencode.ai/v2/docs/providers/)
 
