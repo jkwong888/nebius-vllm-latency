@@ -1,0 +1,15 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: llm-http
+  namespace: llm-latency
+spec:
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: PathPrefix(`/v1/`) || Path(`/health`) || Path(`/metrics`)
+      services:
+        - name: gemma
+          port: 8080
+          responseForwarding:
+            flushInterval: 1ms

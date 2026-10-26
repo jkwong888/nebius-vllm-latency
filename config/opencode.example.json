@@ -1,0 +1,107 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "nebius/gemma-4-31b-it",
+  "share": "disabled",
+  "policies": [
+    {
+      "action": "provider.use",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "nebius",
+      "effect": "allow"
+    }
+  ],
+  "permissions": [
+    {
+      "action": "*",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "edit",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "glob",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "grep",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "python -m pytest*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "git diff*",
+      "effect": "allow"
+    }
+  ],
+  "agents": {
+    "title": {
+      "disabled": true
+    },
+    "summary": {
+      "disabled": true
+    }
+  },
+  "providers": {
+    "nebius": {
+      "name": "Nebius vLLM",
+      "env": [
+        "LLM_API_KEY"
+      ],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "{env:OPENAI_BASE_URL}",
+        "apiKey": "{env:LLM_API_KEY}"
+      },
+      "models": {
+        "gemma-4-31b-it": {
+          "modelID": "gemma-4-31b-it",
+          "name": "Gemma 4 31B",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ],
+            "temperature": true,
+            "reasoning": {
+              "supported": true
+            }
+          },
+          "compatibility": {
+            "reasoningField": "reasoning"
+          },
+          "limit": {
+            "context": 131072,
+            "output": 16384
+          },
+          "body": {
+            "temperature": 0,
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,3 @@
+- op: replace
+  path: /spec/routes/0/match
+  value: Host(`llm.example.com`) && (PathPrefix(`/v1/`) || Path(`/health`) || Path(`/metrics`))

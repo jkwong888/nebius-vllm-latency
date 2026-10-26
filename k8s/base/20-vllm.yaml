@@ -1,0 +1,206 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemma
+  namespace: llm-latency
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gemma
+  template:
+    metadata:
+      labels:
+        app: gemma
+    spec:
+      runtimeClassName: nvidia
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      nodeSelector:
+        latency.nebius.com/storage: "true"
+      initContainers:
+        - name: download-model
+          image: vllm/vllm-openai:v0.32.0
+          command: [python3, -c]
+          args:
+            - |
+              import json
+              import os
+              from pathlib import Path
+              from threading import Event, Thread
+
+              from huggingface_hub import HfApi, snapshot_download
+              from huggingface_hub.utils import disable_progress_bars
+
+              disable_progress_bars()
+
+              revision = os.environ["MODEL_REVISION"]
+              cache_dir = Path(os.environ["HF_HOME"]) / "hub"
+              model_path = Path(os.environ["HF_HOME"]) / "models" / "gemma-4-31B-it" / revision
+              snapshot = cache_dir / "models--google--gemma-4-31B-it" / "snapshots" / revision
+
+              def publish_model(snapshot):
+                  model_path.parent.mkdir(parents=True, exist_ok=True)
+                  temporary_link = model_path.with_name(model_path.name + ".tmp")
+                  temporary_link.unlink(missing_ok=True)
+                  temporary_link.symlink_to(snapshot, target_is_directory=True)
+                  temporary_link.replace(model_path)
+
+              def prepare_model():
+                  snapshot_path = model_path.resolve() if model_path.is_dir() else snapshot
+                  completion = snapshot_path / ".download-complete.json"
+                  if completion.is_file():
+                      files = json.loads(completion.read_text())
+                      if files and all((snapshot_path / name).is_file() for name in files):
+                          publish_model(snapshot_path)
+                          print(f"Using cached model at {snapshot_path}", flush=True)
+                          return
+
+                  completion.unlink(missing_ok=True)
+                  print(f"Downloading model revision {revision}", flush=True)
+                  api = HfApi()
+                  resolved_revision = api.model_info("google/gemma-4-31B-it", revision=revision).sha
+                  files = api.list_repo_files("google/gemma-4-31B-it", revision=resolved_revision)
+                  expected = cache_dir / "models--google--gemma-4-31B-it" / "snapshots" / resolved_revision
+                  stopped = Event()
+
+                  def log_progress():
+                      completed = 0
+                      for name in files:
+                          if (expected / name).is_file():
+                              completed += 1
+                      print(f"Model download: {completed}/{len(files)} files ready (cached or downloaded)", flush=True)
+
+                  def report_progress():
+                      while not stopped.wait(15):
+                          log_progress()
+
+                  print(f"Resolved model revision: {resolved_revision}", flush=True)
+                  log_progress()
+                  reporter = Thread(target=report_progress, daemon=True)
+                  reporter.start()
+                  try:
+                      downloaded = Path(snapshot_download(
+                          repo_id="google/gemma-4-31B-it",
+                          revision=resolved_revision,
+                          cache_dir=str(cache_dir),
+                      ))
+                  finally:
+                      stopped.set()
+                      reporter.join()
+
+                  if downloaded != expected:
+                      raise RuntimeError(f"Unexpected snapshot path: {downloaded}")
+                  if not files or not all((downloaded / name).is_file() for name in files):
+                      raise RuntimeError("Model snapshot is incomplete")
+                  log_progress()
+
+                  completion = downloaded / ".download-complete.json"
+                  temporary = downloaded / ".download-complete.tmp"
+                  temporary.unlink(missing_ok=True)
+                  temporary.write_text(json.dumps(sorted(files)))
+                  temporary.replace(completion)
+                  publish_model(downloaded)
+                  print(f"Model ready at {downloaded}", flush=True)
+
+              prepare_model()
+          env:
+            - name: MODEL_REVISION
+              value: main
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: llm-secrets
+                  key: hf-token
+          resources:
+            requests:
+              cpu: "2"
+              memory: 1Gi
+            limits:
+              memory: 8Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.32.0
+          command: [/bin/bash, -ec]
+          args:
+            - |
+              exec vllm serve /data/hf-cache/models/gemma-4-31B-it/main \
+                --served-model-name gemma-4-31b-it \
+                --host 0.0.0.0 --port 8000 \
+                --dtype bfloat16 --tensor-parallel-size 1 \
+                --max-model-len 131072 --max-num-seqs 1 \
+                --gpu-memory-utilization 0.90 \
+                --enable-prefix-caching \
+                --enable-auto-tool-choice \
+                --reasoning-parser gemma4 --tool-call-parser gemma4 \
+                --chat-template examples/tool_chat_template_gemma4.jinja \
+                --default-chat-template-kwargs '{"enable_thinking":true}' \
+                --api-key "$LLM_API_KEY"
+          env:
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: llm-secrets
+                  key: api-key
+          resources:
+            requests:
+              cpu: "8"
+              memory: 80Gi
+            limits:
+              nvidia.com/gpu: 1
+              memory: 220Gi
+          ports:
+            - name: http
+              containerPort: 8000
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 360
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            timeoutSeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: llm-data
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemma
+  namespace: llm-latency
+spec:
+  selector:
+    app: gemma
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: llm-data
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  local:
+    path: /srv/llm/workloads
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: latency.nebius.com/storage
+              operator: In
+              values: ["true"]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-data
+  namespace: llm-latency
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  volumeName: llm-data
+  resources:
+    requests:
+      storage: 100Gi

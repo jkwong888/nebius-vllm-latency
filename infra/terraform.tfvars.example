@@ -1,0 +1,10 @@
+project_id         = "project-REPLACE-UK-SOUTH1"
+network_id         = "vpcnetwork-REPLACE"
+subnet_id          = "vpcsubnet-REPLACE"
+ssh_public_key     = "ssh-ed25519 REPLACE"
+platform           = "gpu-b300-sxm"
+preset             = "1gpu-24vcpu-346gb"
+boot_disk_size_gib = 100
+data_disk_size_gib = 279 # 93 GiB * 3
+# spot_pricing_policy_id = "pricingpolicy-REPLACE"
+# image_id = "computeimage-REPLACE" # Pin after resolving the stable image family.

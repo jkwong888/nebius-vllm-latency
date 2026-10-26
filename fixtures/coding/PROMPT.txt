@@ -1,0 +1,2 @@
+Read calculator.py and test_calculator.py. Fix multiply so the test passes.
+Run python -m pytest -q, then explain the change in one sentence.

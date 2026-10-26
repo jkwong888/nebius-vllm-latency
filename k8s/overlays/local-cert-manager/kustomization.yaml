@@ -1,0 +1,64 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../local-tls
+- certificates.yaml
+replacements:
+- source:
+    kind: ConfigMap
+    name: deployment-settings
+    fieldPath: data.ACME_EMAIL
+  targets:
+  - select:
+      kind: ClusterIssuer
+    fieldPaths:
+    - spec.acme.email
+- source:
+    kind: ConfigMap
+    name: deployment-settings
+    fieldPath: data.DNS_ZONE
+  targets:
+  - select:
+      kind: ClusterIssuer
+    fieldPaths:
+    - spec.acme.solvers.0.selector.dnsZones.0
+- source:
+    kind: ConfigMap
+    name: deployment-settings
+    fieldPath: data.ACME_ISSUER
+  targets:
+  - select:
+      kind: Certificate
+      name: llm-tls
+    fieldPaths:
+    - spec.issuerRef.name
+- source:
+    kind: ConfigMap
+    name: deployment-settings
+    fieldPath: data.LLM_HOST
+  targets:
+  - select:
+      kind: Certificate
+      name: llm-tls
+    fieldPaths:
+    - spec.dnsNames.0
+  - select:
+      kind: IngressRoute
+      name: llm-https
+    fieldPaths:
+    - spec.routes.0.match
+    options:
+      delimiter: '`'
+      index: 1
+configMapGenerator:
+- name: deployment-settings
+  namespace: llm-latency
+  envs:
+  - .env
+generatorOptions:
+  disableNameSuffixHash: true
+patches:
+- target:
+    kind: IngressRoute
+    name: llm-https
+  path: ingress-host.patch.yaml
