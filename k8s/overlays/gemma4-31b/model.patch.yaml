@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: llm-latency
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: download-model
+          env:
+            - name: MODEL_REPO
+              value: google/gemma-4-31B-it
+      containers:
+        - name: vllm
+          args:
+            - |
+              exec vllm serve /data/hf-cache/models/gemma-4-31B-it/main \
+                --served-model-name gemma-4-31b-it \
+                --host 0.0.0.0 --port 8000 \
+                --dtype bfloat16 --tensor-parallel-size 1 \
+                --max-model-len 131072 --max-num-seqs 1 \
+                --gpu-memory-utilization 0.90 \
+                --enable-prefix-caching \
+                --enable-auto-tool-choice \
+                --reasoning-parser gemma4 --tool-call-parser gemma4 \
+                --chat-template examples/tool_chat_template_gemma4.jinja \
+                --default-chat-template-kwargs '{"enable_thinking":true}' \
+                --api-key "$LLM_API_KEY"

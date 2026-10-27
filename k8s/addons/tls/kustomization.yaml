@@ -1,7 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-- ../local-tls
+- ingress-https.yaml
 - certificates.yaml
 replacements:
 - source:
@@ -57,8 +57,3 @@ configMapGenerator:
   - .env
 generatorOptions:
   disableNameSuffixHash: true
-patches:
-- target:
-    kind: IngressRoute
-    name: llm-https
-  path: ingress-host.patch.yaml

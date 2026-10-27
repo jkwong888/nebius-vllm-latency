@@ -1,6 +1,6 @@
-# Gemma 4 vLLM benchmarks
+# LLM latency benchmarks with vLLM
 
-Deploy one reasoning-enabled vLLM server in a Nebius region (`uk-south1` by default), then run AIPerf and OpenCode directly against its OpenAI-compatible API. Measure individual HTTP round trips separately using `/health`.
+Deploy one reasoning-enabled vLLM server with a Gemma4 or Qwen model in a Nebius region (`uk-south1` by default), then run AIPerf and OpenCode directly against its OpenAI-compatible API to determine the impact of network latency on AI applications.  Measure individual HTTP round trips separately using `/health`.
 
 The repository creates deployment artifacts. Running the infrastructure commands below provisions billable resources.
 
@@ -17,7 +17,6 @@ For private access from your LAN, follow the [VPN gateway deployment instruction
   - [Choose service exposure](#choose-service-exposure)
   - [Deploy and verify HTTP](#deploy-and-verify-http)
   - [Optional: add cert-manager and HTTPS](#optional-add-cert-manager-and-https)
-  - [Optional: add HTTPS with your own certificate](#optional-add-https-with-your-own-certificate)
 - [6. Connect directly to vLLM](#6-connect-directly-to-vllm)
 - [7. Run AIPerf](#7-run-aiperf)
 - [8. Run OpenCode v2](#8-run-opencode-v2)
@@ -34,7 +33,7 @@ For private access from your LAN, follow the [VPN gateway deployment instruction
 | cert-manager, vLLM and ingress | k3s | YAML and `kubectl apply` |
 | AIPerf, OpenCode and HTTP round-trip checks | Your local host | `uv run`, OpenCode and curl |
 
-We use single-node K3s and its packaged Helm controller installs charts through Kubernetes Jobs. The optional cert-manager overlay installs it via the `HelmChart` CRD. We configure the bundled Traefik chart using `HelmChartConfig` YAML.
+We use single-node K3s and its packaged Helm controller installs charts through Kubernetes Jobs. The optional cert-manager add-on installs it via the `HelmChart` CRD. We configure the bundled Traefik chart using `HelmChartConfig` YAML.
 
 ## 1. Environment, configuration, and setup
 
@@ -58,7 +57,7 @@ uv sync --extra test --extra benchmark --locked
 cp infra/terraform.tfvars.example infra/terraform.tfvars
 
 # Optional cert-manager configuration. Preserve an existing .env.
-cp -n k8s/overlays/local-cert-manager/.env.example k8s/overlays/local-cert-manager/.env
+cp -n k8s/addons/tls/.env.example k8s/addons/tls/.env
 ```
 
 Create a tenant and project in Nebius.
@@ -66,6 +65,7 @@ Create a tenant and project in Nebius.
 In `terraform.tfvars`, populate project/network/subnet IDs and your SSH public key.
 
 e.g.
+
 ```hcl
 project_id     = "project-MY_PROJECT_ID"
 network_id     = "vpcnetwork-MY-VPC_NETWORK_ID"
@@ -73,23 +73,26 @@ subnet_id      = "vpcsubnet-MY_VPC_SUBNET_ID"
 ssh_public_key = "<my ssh public key>"
 ```
 
-Optionally, add the VM platform and its resource preset in `infra/terraform.tfvars`. The defaults are:
+Optionally, add the VM platform and its resource preset in `infra/terraform.tfvars`. Make sure to choose a GPU platform and a preset supports in your region. You can check your available quota and available machine preset before applying:
+
+```sh
+nebius compute platform list --parent-id YOUR_PROJECT_ID
+```
+
+The defaults are:
 
 ```hcl
 platform = "gpu-b300-sxm"
 preset   = "1gpu-24vcpu-346gb"
 ```
 
-Choose a GPU platform and a preset it supports in your region. Bootstrap checks NVIDIA driver and runtime availability.
+The default provisions a spot VM that follows market spot prices. Supply `spot_pricing_policy_id` to use an existing maximum-price policy instead.
 
-The default provisions a spot VM that follows market spot prices. Supply `spot_pricing_policy_id` to use an existing maximum-price policy instead. Check your available quota and available machine preset before applying:
+This example uses the `ubuntu24.04-cuda13.0` image. Nebius documents driver 580.x, CUDA 13.0 and Container Toolkit in that image. The resolved image ID is a Terraform output. Set `image_id` to that ID for subsequent reproducibility. [Image documentation](https://docs.nebius.com/compute/storage/boot-disk-images)  You can view the list of available images using this command:
 
 ```sh
-nebius compute platform list --parent-id YOUR_PROJECT_ID
-nebius compute image list-public --region uk-south1
+nebius compute image list-public --region <my-region>
 ```
-
-This example uses the `ubuntu24.04-cuda13.0` image. Nebius documents driver 580.x, CUDA 13.0 and Container Toolkit in that image. The resolved image ID is a Terraform output. Set `image_id` to that ID for subsequent reproducibility. [Image documentation](https://docs.nebius.com/compute/storage/boot-disk-images)
 
 ## 2. Provision and inspect bootstrap
 
@@ -131,9 +134,7 @@ nebius tunnel get --id YOUR_TUNNEL_ID
 
 ## 3. Copy deployment files and SSH into the VM
 
-From your local host, sync only the Kubernetes deployment manifests to the VM. This includes any local overlay `.env` and Secret files under `k8s/`, so the VM can apply the configuration you prepared. The command preserves the directory layout and restricts access to the deployment directory to the SSH user. Files that exist only on the VM are retained.
-
-Rsync must be installed on both machines. Bootstrap installs it on new VMs. For an older VM without it, run `sudo apt-get update && sudo apt-get install -y rsync` in an SSH session first.
+From your local host, sync only the Kubernetes deployment manifests to the VM. This includes any local overlay `.env` and Secret files under `k8s/`, so the VM can apply the configuration you prepared.
 
 ```sh
 export SSH_TARGET=ubuntu@<VM_IP>
@@ -141,10 +142,9 @@ ssh "$SSH_TARGET" 'umask 077 && mkdir -p ~/llm-latency-test && chmod 700 ~/llm-l
 rsync -av --relative \
   --exclude='.DS_Store' --exclude='._*' --exclude='__pycache__/' \
   k8s/ "${SSH_TARGET}:/home/ubuntu/llm-latency-test/"
-ssh "$SSH_TARGET"
 ```
 
-Once connected, enter the deployment directory and check the node:
+On the remote host, enter the deployment directory and check the node:
 
 ```sh
 cd ~/llm-latency-test
@@ -152,19 +152,17 @@ export KUBECONFIG="$HOME/.kube/config"
 kubectl get nodes
 ```
 
-Run all commands in steps 4 and 5 inside this SSH session. If you change deployment source on your local machine, remember to copy them over before applying it on the VM.
-
 ## 4. Prepare the application configuration
 
-On the VM, run these commands from `~/llm-latency-test`. Preview the default overlay:
+On the VM, run these commands from `~/llm-latency-test`. Preview the default overlay, which deploys dense Gemma 4 31B.
 
 ```sh
-kubectl kustomize k8s/overlays/local
+kubectl kustomize k8s/overlays/gemma4-31b
 ```
 
 The deployment uses the published `vllm/vllm-openai:v0.32.0` image.
 
-Create a namespace in Kubernetes to hold the inference server.
+Create a namespace in Kubernetes to hold the inference server and other resources:
 
 ```sh
 kubectl apply -f k8s/base/00-namespace.yaml
@@ -181,7 +179,7 @@ kubectl apply -f k8s/secrets/credentials.secret.yaml
 
 ## 5. Deploy HTTP, then optionally add HTTPS
 
-Continue in the same VM SSH session, from `~/llm-latency-test`. Verify GPU access before starting the model. Delete a previous completed check so that a repeat deployment runs the check again:
+On the remote host, verify GPU access from inside k3s before starting the model.
 
 ```sh
 kubectl -n kube-system rollout status daemonset/nvidia-device-plugin --timeout=300s
@@ -194,28 +192,24 @@ kubectl -n llm-latency delete job gpu-check
 
 ### Choose service exposure
 
-By default, we will deploy the vLLM service and expose it in plaintext HTTP. Optionally, you can choose to terminate TLS connections in the included Traefik ingress controller.  Both routes forward to the same `gemma:8080` service, which targets vLLM directly on pod port 8000.
+The model overlays deploy HTTP on port 80. Optional HTTPS uses cert-manager and Cloudflare DNS-01 through two independent add-ons:
 
-| Overlay | Service routes | Certificate source |
-| --- | --- | --- |
-| `k8s/overlays/local` (default) | `llm-http` on HTTP port 80 | None |
-| `k8s/overlays/local-tls` | HTTP on port 80 plus `llm-https` on HTTPS port 443 | Existing `llm-tls` Secret |
-| `k8s/overlays/local-cert-manager` | HTTP on port 80 plus `llm-https` on HTTPS port 443 | cert-manager |
+| Path | Purpose |
+| --- | --- |
+| `k8s/overlays/<model>` | Deploy the selected model and HTTP ingress |
+| `k8s/addons/cert-manager` | Install cert-manager and its CRDs |
+| `k8s/addons/tls` | Create ACME issuers, the Certificate and HTTPS ingress |
 
-The TLS overlays include `local` and add the HTTPS route without changing `llm-http`. They work when applied after `local` or on a fresh deployment with the required certificate dependencies. There is no automatic HTTP-to-HTTPS redirect. `local-http-tls` and `local-http-cert-manager` remain aliases for `local-tls` and `local-cert-manager` respectively.
+The TLS add-on manages only certificate settings and the HTTPS route. It can be applied alongside any model overlay without changing the running model. HTTP remains available, with no automatic redirect. The loopback `llm-tunnel` route and its Nebius-managed HTTPS URL remain available.
 
-The `llm-tunnel` route remains on loopback port 8088 in every overlay. Its external HTTPS URL and certificate are managed by Nebius.
-
-Cleanup is manual. Applying `local` after a TLS overlay leaves the existing HTTPS route in place. To remove that route, run `kubectl -n llm-latency delete ingressroute llm-https --ignore-not-found`. Certificate resources are retained. 
-
-Copy the updated `k8s` tree to the VM before applying an overlay so that it uses the current manifests.
+To disable direct HTTPS, remove its route with `kubectl -n llm-latency delete ingressroute llm-https --ignore-not-found`. Applying a model overlay does not remove existing TLS resources. Certificate resources are retained.
 
 ### Deploy and verify HTTP
 
 Apply the HTTP overlay after the GPU check succeeds. Wait for the model before sending benchmark traffic.
 
 ```sh
-export KUSTOMIZE_OVERLAY=k8s/overlays/local
+export KUSTOMIZE_OVERLAY=k8s/overlays/gemma4-31b
 kubectl -n llm-latency get secret llm-secrets
 kubectl apply -k "$KUSTOMIZE_OVERLAY"
 ```
@@ -224,7 +218,7 @@ This step may take a long time as it pulls the vllm serving container (~10 GB), 
 
 ```sh
 kubectl -n llm-latency get pods,pvc,ingressroute
-kubectl -n llm-latency logs deployment/gemma -c vllm --tail=80
+kubectl -n llm-latency logs deployment/vllm -c vllm --tail=80
 ```
 
 The application serves HTTP on port 80. Use an `http://` client URL. HTTP sends the API key and request/response content unencrypted, so use it on a trusted network or through the VPN. Allow TCP port 80 through any firewall used for direct HTTP access. The Nebius tunnel continues to use its public HTTPS URL.
@@ -233,20 +227,23 @@ If you're okay with plaintext HTTP, you can proceed to step 6 with this deployme
 
 ### Optional: add cert-manager and HTTPS
 
-This upgrade reuses the running application, model cache, storage and application Secret. Apply `local-cert-manager` to add HTTPS alongside the existing HTTP route. The HTTPS route requires certificate issuance to finish. HTTP remains available throughout issuance.
+This upgrade reuses the running application, model cache, storage and application Secret. Apply the TLS add-on to add HTTPS alongside the existing HTTP route. The HTTPS route requires certificate issuance to finish. HTTP remains available throughout issuance.
 
-First install cert-manager through K3s's built-in [Helm controller](https://docs.k3s.io/add-ons/helm). Its pinned chart includes the namespace, CRDs and RBAC. Wait for all three deployments before creating issuers or certificates:
-
+Stage 1: install cert-manager through K3s's built-in [Helm controller](https://docs.k3s.io/add-ons/helm). Its pinned chart includes the namespace, CRDs and RBAC. Wait for its CRDs and all three deployments before creating issuers or certificates.
 ```sh
 kubectl get crd helmcharts.helm.cattle.io
-kubectl apply -k k8s/overlays/cert-manager
+kubectl apply -k k8s/addons/cert-manager
+for crd in certificates.cert-manager.io clusterissuers.cert-manager.io; do
+  kubectl wait --for=create "crd/$crd" --timeout=300s
+  kubectl wait --for=condition=Established "crd/$crd" --timeout=300s
+done
 for deployment in cert-manager cert-manager-webhook cert-manager-cainjector; do
   kubectl -n cert-manager wait --for=create "deployment/$deployment" --timeout=300s
   kubectl -n cert-manager rollout status "deployment/$deployment" --timeout=300s
 done
 ```
 
-In this example, we configure certificate issuance through Cloudflare with DNS-01 authorization. Prepare a Cloudflare token scoped to Zone DNS Edit and Zone Read for the selected zone, then populate and apply its Secret:
+Stage 2: in this example, we configure certificate issuance through Cloudflare with DNS-01 authorization. Prepare a Cloudflare token scoped to Zone DNS Edit and Zone Read for the selected zone, then populate and apply its Secret:
 
 ```sh
 cp -n k8s/secrets/cloudflare.secret.yaml.example k8s/secrets/cloudflare.secret.yaml
@@ -258,18 +255,17 @@ kubectl apply -f k8s/secrets/cloudflare.secret.yaml
 Prepare the certificate settings on the VM. Preserve an existing `.env`:
 
 ```sh
-cp -n k8s/overlays/local-cert-manager/.env.example k8s/overlays/local-cert-manager/.env
+cp -n k8s/addons/tls/.env.example k8s/addons/tls/.env
 # Edit .env: LLM_HOST, DNS_ZONE, ACME_EMAIL and ACME_ISSUER.
 ```
 
 Set `LLM_HOST` to the hostname clients will use, `DNS_ZONE` to its Cloudflare zone and `ACME_EMAIL` to your ACME contact email. Start with `ACME_ISSUER=letsencrypt-staging` to validate DNS-01. Allow TCP port 443 through any firewall used for direct HTTPS access.
 
-Now apply the selected overlay. It includes the application resources, adds issuers and a Certificate, and creates `llm-https` using the `llm-tls` Secret and `LLM_HOST` hostname:
+Apply the TLS add-on. It adds issuers, a Certificate and `llm-https` using the `llm-tls` Secret and `LLM_HOST` hostname. It contains no model deployment. Check the rendered resources against the API server before applying them, which also verifies webhook availability:
 
 ```sh
-export KUSTOMIZE_OVERLAY=k8s/overlays/local-cert-manager
-kubectl kustomize "$KUSTOMIZE_OVERLAY"
-kubectl apply -k "$KUSTOMIZE_OVERLAY"
+kubectl apply --dry-run=server -k k8s/addons/tls
+kubectl apply -k k8s/addons/tls
 kubectl -n llm-latency wait --for=condition=Ready certificate/llm-tls --timeout=600s
 kubectl -n llm-latency get certificate llm-tls
 kubectl -n llm-latency get secret llm-tls
@@ -278,27 +274,13 @@ kubectl -n llm-latency get secret llm-tls
 Staging certificates are untrusted by clients. After staging issuance succeeds, set `ACME_ISSUER=letsencrypt-production` in the same `.env`, then apply it again:
 
 ```sh
-kubectl apply -k "$KUSTOMIZE_OVERLAY"
+kubectl apply -k k8s/addons/tls
 kubectl -n llm-latency wait --for=condition=Ready certificate/llm-tls --timeout=600s
 ```
 
 Wait until the replacement Certificate is Ready and the endpoint presents a trusted production certificate before testing. On your local host, set `LLM_BASE_URL` to `https://` using the `LLM_HOST` hostname for direct HTTPS access. The Nebius tunnel retains its own external URL.
 
 The HTTPS application route uses Traefik's [IngressRoute TLS configuration](https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/crd/http/ingressroute/).
-
-### Optional: add HTTPS with your own certificate
-
-If you already have a trusted certificate, you can upgrade the HTTP deployment directly. Place its certificate chain and private key on the VM, then run:
-
-```sh
-kubectl -n llm-latency create secret tls llm-tls \
-  --cert=/path/to/fullchain.pem --key=/path/to/privkey.pem \
-  --dry-run=client -o yaml | kubectl apply -f -
-export KUSTOMIZE_OVERLAY=k8s/overlays/local-tls
-kubectl apply -k "$KUSTOMIZE_OVERLAY"
-```
-
-Allow TCP port 443 and use `https://` client URLs with a hostname covered by the certificate. Applying `local-tls` retains the HTTP route. Any route cleanup is manual.
 
 ## 6. Connect directly to vLLM
 
@@ -464,7 +446,7 @@ To inspect the serving pod on the VM:
 
 ```sh
 kubectl -n llm-latency get pods,services,ingressroutes
-kubectl -n llm-latency logs deployment/gemma -c vllm --tail=80
+kubectl -n llm-latency logs deployment/vllm -c vllm --tail=80
 ```
 
 Collect AIPerf artifacts and any server logs you need before stopping or destroying resources. Stop through Terraform rather than an operating-system shutdown:
@@ -481,3 +463,16 @@ terraform -chdir=infra destroy
 
 Export required data before destroying either disk. Stopped VMs can still incur storage and IP costs. Preserve `infra/terraform.tfstate*`, `infra/terraform.tfvars`, local environment files and Kubernetes Secrets when cleaning generated output.
 
+
+## Compare model latency profiles
+
+Choose one of four model overlays. Each replaces the same `deployment/vllm` using the shared infrastructure in `k8s/base`. The Deployment and Service are named `vllm`. Public HTTP, HTTPS and tunnel URLs remain the same. Only one model runs at a time.
+
+| Overlay | API model name | Hugging Face weights and tokenizer | Context cap |
+| --- | --- | --- | --- |
+| `gemma4-31b` | `gemma-4-31b-it` | `google/gemma-4-31B-it` | 131,072 |
+| `gemma4-26b-a4b` | `gemma-4-26b-a4b-it` | `google/gemma-4-26B-A4B-it` | 131,072 |
+| `qwen3.8-27b` | `qwen3.8-27b` | `Qwen/Qwen3.8-27B` | 131,072 |
+| `qwen3.6-35b-a3b` | `qwen3.6-35b-a3b` | `Qwen/Qwen3.6-35B-A3B` | 131,072 |
+
+Gemma4-31B and Qwen3.8-27B are dense models. Gemma4-26B-A4B and Qwen3.6-35B-A3B are MoE models with approximately 4B and 3B active parameters per token respectively. All expert weights still need memory. Active parameter count alone does not determine latency. Sources: [Gemma4 MoE model card](https://huggingface.co/google/gemma-4-26B-A4B-it), [vLLM Gemma4 recipe](https://docs.vllm.ai/projects/recipes/en/stable/Google/Gemma4.html), [Qwen3.8 model card](https://huggingface.co/Qwen/Qwen3.8-27B), and [Qwen3.6 model card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B).

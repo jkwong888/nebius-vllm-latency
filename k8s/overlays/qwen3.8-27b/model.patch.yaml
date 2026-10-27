@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: llm-latency
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: download-model
+          env:
+            - name: MODEL_REPO
+              value: Qwen/Qwen3.8-27B
+      containers:
+        - name: vllm
+          args:
+            - |
+              exec vllm serve /data/hf-cache/models/Qwen3.8-27B/main \
+                --served-model-name qwen3.8-27b \
+                --host 0.0.0.0 --port 8000 \
+                --dtype bfloat16 --tensor-parallel-size 1 \
+                --max-model-len 131072 --max-num-seqs 1 \
+                --gpu-memory-utilization 0.90 \
+                --enable-prefix-caching \
+                --enable-auto-tool-choice \
+                --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
+                --default-chat-template-kwargs '{"enable_thinking":true}' \
+                --api-key "$LLM_API_KEY"

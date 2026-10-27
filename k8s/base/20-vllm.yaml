@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: gemma
+  name: vllm
   namespace: llm-latency
 spec:
   replicas: 1
@@ -9,11 +9,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: gemma
+      app: vllm
   template:
     metadata:
       labels:
-        app: gemma
+        app: vllm
     spec:
       runtimeClassName: nvidia
       automountServiceAccountToken: false
@@ -37,9 +37,12 @@ spec:
               disable_progress_bars()
 
               revision = os.environ["MODEL_REVISION"]
+              model_repo = os.environ["MODEL_REPO"]
+              model_name = model_repo.rsplit("/", 1)[-1]
+              cache_name = "models--" + model_repo.replace("/", "--")
               cache_dir = Path(os.environ["HF_HOME"]) / "hub"
-              model_path = Path(os.environ["HF_HOME"]) / "models" / "gemma-4-31B-it" / revision
-              snapshot = cache_dir / "models--google--gemma-4-31B-it" / "snapshots" / revision
+              model_path = Path(os.environ["HF_HOME"]) / "models" / model_name / revision
+              snapshot = cache_dir / cache_name / "snapshots" / revision
 
               def publish_model(snapshot):
                   model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,9 +64,9 @@ spec:
                   completion.unlink(missing_ok=True)
                   print(f"Downloading model revision {revision}", flush=True)
                   api = HfApi()
-                  resolved_revision = api.model_info("google/gemma-4-31B-it", revision=revision).sha
-                  files = api.list_repo_files("google/gemma-4-31B-it", revision=resolved_revision)
-                  expected = cache_dir / "models--google--gemma-4-31B-it" / "snapshots" / resolved_revision
+                  resolved_revision = api.model_info(model_repo, revision=revision).sha
+                  files = api.list_repo_files(model_repo, revision=resolved_revision)
+                  expected = cache_dir / cache_name / "snapshots" / resolved_revision
                   stopped = Event()
 
                   def log_progress():
@@ -83,7 +86,7 @@ spec:
                   reporter.start()
                   try:
                       downloaded = Path(snapshot_download(
-                          repo_id="google/gemma-4-31B-it",
+                          repo_id=model_repo,
                           revision=resolved_revision,
                           cache_dir=str(cache_dir),
                       ))
@@ -109,6 +112,8 @@ spec:
           env:
             - name: MODEL_REVISION
               value: main
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
             - name: HF_HOME
               value: /data/hf-cache
             - name: HF_TOKEN
@@ -129,20 +134,6 @@ spec:
         - name: vllm
           image: vllm/vllm-openai:v0.32.0
           command: [/bin/bash, -ec]
-          args:
-            - |
-              exec vllm serve /data/hf-cache/models/gemma-4-31B-it/main \
-                --served-model-name gemma-4-31b-it \
-                --host 0.0.0.0 --port 8000 \
-                --dtype bfloat16 --tensor-parallel-size 1 \
-                --max-model-len 131072 --max-num-seqs 1 \
-                --gpu-memory-utilization 0.90 \
-                --enable-prefix-caching \
-                --enable-auto-tool-choice \
-                --reasoning-parser gemma4 --tool-call-parser gemma4 \
-                --chat-template examples/tool_chat_template_gemma4.jinja \
-                --default-chat-template-kwargs '{"enable_thinking":true}' \
-                --api-key "$LLM_API_KEY"
           env:
             - name: HF_HOME
               value: /data/hf-cache
@@ -195,11 +186,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: gemma
+  name: vllm
   namespace: llm-latency
 spec:
   selector:
-    app: gemma
+    app: vllm
   ports:
     - name: http
       port: 8080

@@ -7,9 +7,9 @@ spec:
   entryPoints: [websecure]
   routes:
     - kind: Rule
-      match: PathPrefix(`/v1/`) || Path(`/health`) || Path(`/metrics`)
+      match: Host(`llm.example.com`) && (PathPrefix(`/v1/`) || Path(`/health`) || Path(`/metrics`))
       services:
-        - name: gemma
+        - name: vllm
           port: 8080
           responseForwarding:
             flushInterval: 1ms
